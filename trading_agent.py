@@ -1,99 +1,177 @@
 #!/usr/bin/env python3
 """
-AI Trading Agent για uFunded Platform - v2.0
-- 16:00: Αρχική ανάλυση & Top 5 signals
-- 16:00-17:00: Monitoring κάθε 5 λεπτά
-- Alert αν αλλάξει κάτι σημαντικό
+AI Trading Agent για uFunded Platform - v3.0
+- Όλες οι μετοχές S&P 500 + υποψήφιες
+- Αυτόματη ενημέρωση λίστας
+- Monitoring 16:00-17:00
+- Alerts για σημαντικές αλλαγές
 """
 
 import yfinance as yf
 import anthropic
 import requests
-import schedule
 import time
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime
 import pytz
 import logging
-import os
+import io
 
 TELEGRAM_BOT_TOKEN = "8713919672:AAEtVBMT9NsSfvXdHlVygrr7XanJU8GilG4"
 TELEGRAM_CHAT_ID = "7235378762"
 ANTHROPIC_API_KEY = "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"
 
 LEVERAGE_CAPITAL = 90_000
-DAILY_PROFIT_TARGET_EUR = 250
-SEND_HOUR = 16
-SEND_MINUTE = 0
-MONITOR_END_HOUR = 17
 MONITOR_INTERVAL_MINUTES = 5
+MONITOR_END_HOUR = 17
+PRICE_CHANGE_ALERT = 0.8
+VOLUME_SPIKE_ALERT = 2.5
 
-# Κατώφλια αλλαγής για alert
-PRICE_CHANGE_ALERT = 0.8    # % αλλαγή τιμής
-RSI_CHANGE_ALERT = 8        # μονάδες RSI
-VOLUME_SPIKE_ALERT = 2.5    # x φορές μέσο όγκο
-
-UFUNDED_SYMBOLS = {
-    "Μετοχές": {
-        "AAPL":"Apple Inc.","MSFT":"Microsoft Corp.","GOOGL":"Alphabet (Google)",
-        "AMZN":"Amazon.com","NVDA":"NVIDIA Corp.","TSLA":"Tesla Inc.",
-        "META":"Meta Platforms","NFLX":"Netflix Inc.","AMD":"Advanced Micro Devices",
-        "INTC":"Intel Corp.","BABA":"Alibaba Group","UBER":"Uber Technologies",
-        "JPM":"JPMorgan Chase","BAC":"Bank of America","GS":"Goldman Sachs",
-        "V":"Visa Inc.","MA":"Mastercard","DIS":"Walt Disney Co.",
-        "PYPL":"PayPal Holdings","CRM":"Salesforce Inc.","BA":"Boeing Co.",
-        "XOM":"ExxonMobil Corp.","JNJ":"Johnson & Johnson","WMT":"Walmart Inc.",
-        "KO":"Coca-Cola Co.","PEP":"PepsiCo Inc.","MCD":"McDonald's Corp.",
-        "SBUX":"Starbucks Corp.","NKE":"Nike Inc.","SPOT":"Spotify Technology",
-    },
-    "Commodities": {
-        "GC=F":"Χρυσός (Gold)","SI=F":"Ασήμι (Silver)","CL=F":"Αργό Πετρέλαιο",
-        "NG=F":"Φυσικό Αέριο","HG=F":"Χαλκός","PL=F":"Πλατίνα",
-        "ZW=F":"Σιτάρι","ZC=F":"Καλαμπόκι","ZS=F":"Σόγια","KC=F":"Καφές",
-    },
-    "Indices": {
-        "SPY":"S&P 500 ETF","QQQ":"NASDAQ 100 ETF","DIA":"Dow Jones ETF","IWM":"Russell 2000 ETF",
-    }
+# Commodities & Indices (σταθερά)
+EXTRA_SYMBOLS = {
+    "GC=F":"Χρυσός","SI=F":"Ασήμι","CL=F":"Αργό Πετρέλαιο",
+    "NG=F":"Φυσικό Αέριο","HG=F":"Χαλκός","PL=F":"Πλατίνα",
+    "ZW=F":"Σιτάρι","ZC=F":"Καλαμπόκι","ZS=F":"Σόγια","KC=F":"Καφές",
+    "SPY":"S&P 500 ETF","QQQ":"NASDAQ 100 ETF","DIA":"Dow Jones ETF","IWM":"Russell 2000 ETF",
 }
+
+# Υποψήφιες για S&P 500 (high-cap που δεν είναι ακόμα μέσα)
+SP500_CANDIDATES = [
+    "UBER","ABNB","SNOW","PLTR","RIVN","LCID","RBLX","HOOD",
+    "COIN","DKNG","PENN","SOFI","AFRM","UPST","OPEN","WISH",
+    "IONQ","JOBY","ARCHER","LILM","ACHR","EVTL","SPCE","ASTS",
+    "LUNR","RDW","MNTS","BKSY","SATL","GNPK"
+]
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
 
 class TradingAgent:
     def __init__(self):
         self.client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         self.all_symbols = {}
-        for category, symbols in UFUNDED_SYMBOLS.items():
-            for sym, name in symbols.items():
-                self.all_symbols[sym] = {"name": name, "category": category}
-
-        # State για monitoring
-        self.active_signals = []        # Τα 5 signals που δόθηκαν στις 16:00
-        self.snapshot_at_16 = {}       # Τιμές/δείκτες στις 16:00
-        self.monitoring_active = False  # Αν τρέχει το monitoring
-        self.alerts_sent = set()        # Για να μην στέλνουμε ίδιο alert 2 φορές
+        self.active_signals = []
+        self.snapshot_at_16 = {}
+        self.monitoring_active = False
+        self.alerts_sent = set()
 
     # ─────────────────────────────────────────────
-    # ΣΥΛΛΟΓΗ ΔΕΔΟΜΕΝΩΝ
+    # ΦΟΡΤΩΣΗ S&P 500 + ΥΠΟΨΗΦΙΩΝ
     # ─────────────────────────────────────────────
-    def fetch_market_data(self, symbol):
+    def load_sp500_symbols(self):
+        """Κατεβάζει αυτόματα όλες τις μετοχές S&P 500 από Wikipedia"""
+        logger.info("📋 Φόρτωση S&P 500 από Wikipedia...")
+        try:
+            url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+            resp = requests.get(url, timeout=15)
+            tables = pd.read_html(io.StringIO(resp.text))
+            df = tables[0]
+            symbols = {}
+            for _, row in df.iterrows():
+                sym = str(row['Symbol']).replace('.', '-')
+                name = str(row['Security'])
+                symbols[sym] = {"name": name, "category": "S&P 500"}
+            logger.info(f"✅ Φορτώθηκαν {len(symbols)} μετοχές S&P 500")
+            return symbols
+        except Exception as e:
+            logger.error(f"❌ Σφάλμα φόρτωσης S&P 500: {e}")
+            # Fallback με βασικές μετοχές
+            return {
+                "AAPL":{"name":"Apple","category":"S&P 500"},
+                "MSFT":{"name":"Microsoft","category":"S&P 500"},
+                "NVDA":{"name":"NVIDIA","category":"S&P 500"},
+                "GOOGL":{"name":"Alphabet","category":"S&P 500"},
+                "AMZN":{"name":"Amazon","category":"S&P 500"},
+                "META":{"name":"Meta","category":"S&P 500"},
+                "TSLA":{"name":"Tesla","category":"S&P 500"},
+                "JPM":{"name":"JPMorgan","category":"S&P 500"},
+                "V":{"name":"Visa","category":"S&P 500"},
+                "UNH":{"name":"UnitedHealth","category":"S&P 500"},
+            }
+
+    def load_all_symbols(self):
+        """Φορτώνει S&P500 + υποψήφιες + commodities"""
+        # S&P 500
+        self.all_symbols = self.load_sp500_symbols()
+
+        # Υποψήφιες για S&P 500
+        for sym in SP500_CANDIDATES:
+            try:
+                ticker = yf.Ticker(sym)
+                info = ticker.info
+                name = info.get('longName', sym)
+                self.all_symbols[sym] = {"name": name, "category": "Υποψήφια S&P 500"}
+            except:
+                self.all_symbols[sym] = {"name": sym, "category": "Υποψήφια S&P 500"}
+
+        # Commodities & Indices
+        for sym, name in EXTRA_SYMBOLS.items():
+            cat = "Commodity" if "=F" in sym else "Index ETF"
+            self.all_symbols[sym] = {"name": name, "category": cat}
+
+        logger.info(f"✅ Σύνολο συμβόλων: {len(self.all_symbols)}")
+
+    # ─────────────────────────────────────────────
+    # ΦΙΛΤΡΑΡΙΣΜΑ - Τα πιο ενδιαφέροντα σήμερα
+    # ─────────────────────────────────────────────
+    def get_top_movers(self, limit=80):
+        """Βρίσκει τις μετοχές με τη μεγαλύτερη κίνηση σήμερα"""
+        logger.info(f"🔍 Σάρωση {len(self.all_symbols)} συμβόλων για top movers...")
+        results = []
+        count = 0
+
+        for symbol, info in self.all_symbols.items():
+            try:
+                ticker = yf.Ticker(symbol)
+                hist = ticker.history(period="2d", interval="1d")
+                if len(hist) < 2:
+                    continue
+
+                current = hist['Close'].iloc[-1]
+                prev = hist['Close'].iloc[-2]
+                change_pct = ((current - prev) / prev) * 100
+                volume = hist['Volume'].iloc[-1]
+
+                results.append({
+                    "symbol": symbol,
+                    "name": info["name"],
+                    "category": info["category"],
+                    "current_price": round(current, 4),
+                    "change_pct": round(change_pct, 2),
+                    "volume": volume,
+                    "abs_change": abs(change_pct)
+                })
+                count += 1
+                if count % 50 == 0:
+                    logger.info(f"  ... σκανάρισα {count} μετοχές")
+
+            except Exception as e:
+                continue
+
+        # Ταξινόμηση: μεγαλύτερη κίνηση πρώτα
+        results.sort(key=lambda x: x['abs_change'], reverse=True)
+        top = results[:limit]
+        logger.info(f"✅ Top {len(top)} movers επιλέχθηκαν για ανάλυση")
+        return top
+
+    # ─────────────────────────────────────────────
+    # ΤΕΧΝΙΚΗ ΑΝΑΛΥΣΗ
+    # ─────────────────────────────────────────────
+    def fetch_technical_data(self, symbol, basic_data):
+        """Προσθέτει τεχνικούς δείκτες στα βασικά δεδομένα"""
         try:
             ticker = yf.Ticker(symbol)
             hist = ticker.history(period="60d", interval="1d")
-            hist_1h = ticker.history(period="5d", interval="5m")
-
-            if hist.empty:
-                return None
+            if len(hist) < 20:
+                return basic_data
 
             closes = hist['Close']
             volumes = hist['Volume']
-            current_price = closes.iloc[-1]
-            prev_close = closes.iloc[-2]
-            change_pct = ((current_price - prev_close) / prev_close) * 100
 
             ma20 = closes.rolling(20).mean().iloc[-1]
-            ma50 = closes.rolling(50).mean().iloc[-1] if len(closes) >= 50 else ma20
+            ma50 = closes.rolling(min(50, len(closes))).mean().iloc[-1]
 
             delta = closes.diff()
             gain = delta.clip(lower=0).rolling(14).mean()
@@ -113,40 +191,17 @@ class TradingAgent:
             avg_vol = volumes.rolling(20).mean().iloc[-1]
             vol_ratio = volumes.iloc[-1] / avg_vol if avg_vol > 0 else 1
 
-            # Τρέχων όγκος από 5λεπτα
-            if not hist_1h.empty:
-                today_vol_live = hist_1h['Volume'].tail(12).sum()  # τελευταία ώρα
-                avg_hourly_vol = hist_1h['Volume'].mean() * 12
-                live_vol_ratio = today_vol_live / avg_hourly_vol if avg_hourly_vol > 0 else 1
-            else:
-                live_vol_ratio = vol_ratio
-
-            return {
-                "symbol": symbol,
-                "name": self.all_symbols[symbol]["name"],
-                "category": self.all_symbols[symbol]["category"],
-                "current_price": round(current_price, 4),
-                "change_pct": round(change_pct, 2),
+            basic_data.update({
                 "ma20": round(ma20, 4),
                 "ma50": round(ma50, 4),
                 "rsi": round(rsi, 2),
-                "macd_hist": round(macd_hist, 4),
+                "macd_hist": round(macd_hist, 6),
                 "atr": round(atr, 4),
                 "vol_ratio": round(vol_ratio, 2),
-                "live_vol_ratio": round(live_vol_ratio, 2),
-            }
-        except Exception as e:
-            logger.error(f"Σφάλμα {symbol}: {e}")
-            return None
-
-    def fetch_all_market_data(self):
-        results = []
-        for symbol in self.all_symbols:
-            data = self.fetch_market_data(symbol)
-            if data:
-                results.append(data)
-        logger.info(f"✅ Δεδομένα για {len(results)} σύμβολα")
-        return results
+            })
+            return basic_data
+        except:
+            return basic_data
 
     # ─────────────────────────────────────────────
     # TELEGRAM
@@ -157,50 +212,59 @@ class TradingAgent:
         for chunk in chunks:
             try:
                 requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": chunk}, timeout=10)
+                time.sleep(0.5)
             except Exception as e:
                 logger.error(f"Telegram error: {e}")
 
     # ─────────────────────────────────────────────
-    # ΑΡΧΙΚΗ ΑΝΑΛΥΣΗ 16:00
+    # AI ΑΝΑΛΥΣΗ
     # ─────────────────────────────────────────────
     def analyze_with_claude(self, market_data):
         data_summary = []
-        for d in market_data:
-            rsi_signal = "ΥΠΕΡΑΓΟΡΑ" if d['rsi'] > 70 else ("ΥΠΕΡΠΩΛΗΣΗ" if d['rsi'] < 30 else "ΟΥΔΕΤΕΡΟ")
-            ma_signal = "ΑΝΟΔΙΚΟ" if d['current_price'] > d['ma50'] else "ΚΑΘΟΔΙΚΟ"
+        for d in market_data[:60]:  # Max 60 για να χωράει στο context
+            rsi = d.get('rsi', 50)
+            rsi_signal = "ΥΠΕΡΑΓΟΡΑ" if rsi > 70 else ("ΥΠΕΡΠΩΛΗΣΗ" if rsi < 30 else "ΟΥΔΕΤΕΡΟ")
+            candidate_flag = " ⭐ΥΠΟΨΗΦΙΑ S&P500" if d['category'] == "Υποψήφια S&P 500" else ""
             data_summary.append(
-                f"• {d['symbol']} ({d['name']}) [{d['category']}]\n"
+                f"• {d['symbol']} ({d['name']}) [{d['category']}]{candidate_flag}\n"
                 f"  Τιμή: ${d['current_price']} | Σήμερα: {d['change_pct']:+.2f}%\n"
-                f"  RSI: {d['rsi']} ({rsi_signal}) | MACD hist: {d['macd_hist']} | MA: {ma_signal}\n"
-                f"  ATR: {d['atr']} | Όγκος: {d['vol_ratio']}x"
+                f"  RSI: {rsi} ({rsi_signal}) | MACD: {d.get('macd_hist','N/A')} | ATR: {d.get('atr','N/A')}\n"
+                f"  Όγκος: {d.get('vol_ratio','N/A')}x μέσο"
             )
+
         today_date = datetime.now().strftime("%d/%m/%Y")
         prompt = f"""Είσαι expert trading analyst για uFunded με μόχλευση $90,000 USD.
-ΗΜΕΡΟΜΗΝΙΑ: {today_date} | ΣΤΟΧΟΣ: €250 ημερήσιο κέρδος | ΩΡΑ: 16:00 (κλείσιμο χρηματιστηρίου σε 1 ώρα)
+ΗΜΕΡΟΜΗΝΙΑ: {today_date} | ΣΤΟΧΟΣ: €250 ημερήσιο κέρδος
 
-=== ΔΕΔΟΜΕΝΑ ΑΓΟΡΑΣ ===
+Ανέλυσα {len(market_data)} μετοχές S&P 500 + υποψήφιες + commodities.
+Τα παρακάτω είναι τα TOP movers σήμερα:
+
 {chr(10).join(data_summary)}
 
-Επέλεξε τις ΚΑΛΥΤΕΡΕΣ 5 για trading και στείλε ακριβώς σε αυτό το format:
+Επέλεξε τις ΚΑΛΥΤΕΡΕΣ 5 ευκαιρίες για trading σήμερα.
+Προτίμησε μετοχές με: ισχυρά τεχνικά σήματα, υψηλό όγκο, σαφή τάση.
+Αν υπάρχει υποψήφια S&P 500 με δυνατά σήματα, συμπερίλαβέ την!
 
+Format:
 🎯 TOP 5 TRADING SIGNALS - {today_date}
+📊 Ανάλυση: {len(market_data)} μετοχές S&P500 + υποψήφιες + commodities
 
 ═══════════════════════════
-📌 1. [ΣΥΜΒΟΛΟ] - [ΟΝΟΜΑ]
+📌 1. [ΣΥΜΒΟΛΟ] - [ΟΝΟΜΑ] [[ΚΑΤΗΓΟΡΙΑ]]
 [BUY 🟢 ή SELL 🔴]
 💰 Entry: $[τιμή]
 🛑 Stop Loss: $[τιμή] (-[%]%)
 🎯 Take Profit: $[τιμή] (+[%]%)
 💼 Κεφάλαιο: $[ποσό] ([%]%)
 📈 Αναμ. Κέρδος: $[USD] ≈ €[EUR]
-📊 Σήματα: [σύντομη ανάλυση]
+📊 Σήματα: [ανάλυση]
 ⚡ Εμπιστοσύνη: [Χαμηλό/Μέτριο/Υψηλό]
 
 [επανέλαβε για 2,3,4,5]
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 💹 ΣΥΝΟΛΙΚΟ ΑΝΑΜ. ΚΕΡΔΟΣ: $[USD] ≈ €[EUR]
-⚠️ Παρακολούθηση κάθε 5 λεπτά έως 17:00. Θα ειδοποιηθείς αν αλλάξει κάτι."""
+⚠️ Monitoring κάθε 5λεπτα έως 17:00"""
 
         response = self.client.messages.create(
             model="claude-haiku-4-5-20251001",
@@ -209,68 +273,72 @@ class TradingAgent:
         )
         return response.content[0].text
 
+    # ─────────────────────────────────────────────
+    # ΑΡΧΙΚΗ ΑΝΑΛΥΣΗ 16:00
+    # ─────────────────────────────────────────────
     def run_daily_analysis(self):
         logger.info("🚀 ΑΝΑΛΥΣΗ 16:00")
+        self.send_telegram(
+            f"🔍 Ξεκινά ανάλυση {len(self.all_symbols)} μετοχών...\n"
+            f"📊 S&P 500 + Υποψήφιες + Commodities\n"
+            f"⏳ Περίμενε 3-5 λεπτά..."
+        )
+
         try:
-            market_data = self.fetch_all_market_data()
-            if not market_data:
-                self.send_telegram("⚠️ Δεν ήταν δυνατή η συλλογή δεδομένων.")
-                return
+            # Βήμα 1: Βρες top movers
+            top_movers = self.get_top_movers(limit=80)
 
-            analysis = self.analyze_with_claude(market_data)
+            # Βήμα 2: Τεχνική ανάλυση στα top movers
+            logger.info("📈 Τεχνική ανάλυση top movers...")
+            enriched = []
+            for d in top_movers:
+                enriched_d = self.fetch_technical_data(d['symbol'], d)
+                enriched.append(enriched_d)
 
-            # Αποθήκευση snapshot για monitoring
-            self.snapshot_at_16 = {d['symbol']: d for d in market_data}
-
-            # Εξαγωγή symbols από την ανάλυση
-            self.active_signals = []
-            for d in market_data:
-                if d['symbol'] in analysis:
-                    self.active_signals.append(d['symbol'])
-            self.active_signals = self.active_signals[:5]
-
+            # Αποθήκευση snapshot
+            self.snapshot_at_16 = {d['symbol']: d for d in enriched}
+            self.active_signals = [d['symbol'] for d in enriched[:5]]
             self.alerts_sent = set()
             self.monitoring_active = True
 
-            header = (f"🤖 AI Trading Agent - uFunded\n"
-                      f"📅 {datetime.now().strftime('%d/%m/%Y %H:%M')} (Ώρα Ελλάδας)\n"
-                      f"💼 Κεφάλαιο: $90,000 | 🎯 Στόχος: €250\n"
-                      f"🔍 Monitoring κάθε 5λεπτα έως 17:00\n"
-                      f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+            # Βήμα 3: AI ανάλυση
+            analysis = self.analyze_with_claude(enriched)
+
+            header = (
+                f"🤖 AI Trading Agent v3.0 - uFunded\n"
+                f"📅 {datetime.now().strftime('%d/%m/%Y %H:%M')} (Ώρα Ελλάδας)\n"
+                f"💼 Κεφάλαιο: $90,000 | 🎯 Στόχος: €250\n"
+                f"📊 Σκανάρισα: {len(self.all_symbols)} μετοχές\n"
+                f"🔍 Monitoring κάθε 5λεπτα έως 17:00\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            )
             self.send_telegram(header + analysis)
-            logger.info("✅ Αρχική ανάλυση εστάλη! Ξεκινά monitoring...")
+            logger.info("✅ Ανάλυση εστάλη!")
 
         except Exception as e:
             logger.error(f"❌ {e}")
             self.send_telegram(f"❌ Σφάλμα: {e}")
 
     # ─────────────────────────────────────────────
-    # MONITORING 16:00 - 17:00
+    # MONITORING 16:00-17:00
     # ─────────────────────────────────────────────
     def check_for_changes(self):
-        """Τρέχει κάθε 5 λεπτά - ελέγχει αλλαγές"""
         greece_tz = pytz.timezone("Europe/Athens")
         now = datetime.now(greece_tz)
 
-        # Σταμάτα monitoring μετά τις 17:00
         if now.hour >= MONITOR_END_HOUR:
             if self.monitoring_active:
                 self.monitoring_active = False
-                self.send_telegram("🔴 Monitoring ολοκληρώθηκε για σήμερα.\n📊 Καλή επιτυχία με τις επενδύσεις σου!")
-                logger.info("⏹ Monitoring σταμάτησε (17:00)")
+                self.send_telegram("🔴 Monitoring ολοκληρώθηκε.\n📊 Καλή επιτυχία με τις επενδύσεις σου!")
             return
 
         if not self.monitoring_active or not self.snapshot_at_16:
             return
 
-        logger.info(f"🔍 Monitoring check στις {now.strftime('%H:%M')}")
-
+        logger.info(f"🔍 Monitor check {now.strftime('%H:%M')}")
         alerts = []
 
-        # Έλεγξε μόνο τα active signals
-        symbols_to_check = self.active_signals if self.active_signals else list(self.all_symbols.keys())[:10]
-
-        for symbol in symbols_to_check:
+        for symbol in list(self.snapshot_at_16.keys())[:20]:
             try:
                 ticker = yf.Ticker(symbol)
                 hist = ticker.history(period="1d", interval="5m")
@@ -278,112 +346,75 @@ class TradingAgent:
                     continue
 
                 current_price = hist['Close'].iloc[-1]
-                current_vol = hist['Volume'].tail(3).sum()
-
-                if symbol not in self.snapshot_at_16:
-                    continue
-
                 snap = self.snapshot_at_16[symbol]
                 old_price = snap['current_price']
                 name = snap['name']
-
-                # % αλλαγή από το 16:00
                 price_change = ((current_price - old_price) / old_price) * 100
-
                 alert_key = f"{symbol}_{round(price_change, 1)}"
 
-                # Μεγάλη αλλαγή τιμής
                 if abs(price_change) >= PRICE_CHANGE_ALERT and alert_key not in self.alerts_sent:
                     direction = "📈 ΑΝΕΒΗΚΕ" if price_change > 0 else "📉 ΕΠΕΣΕ"
                     emoji = "🟢" if price_change > 0 else "🔴"
 
-                    # AI αξιολόγηση της αλλαγής
-                    ai_advice = self.get_ai_alert_advice(symbol, name, old_price, current_price, price_change, snap)
+                    try:
+                        advice_resp = self.client.messages.create(
+                            model="claude-haiku-4-5-20251001",
+                            max_tokens=150,
+                            messages=[{"role": "user", "content":
+                                f"Trading alert: {symbol} άλλαξε {price_change:+.2f}% από ${old_price} → ${round(current_price,4)}. RSI: {snap.get('rsi','N/A')}. Σύντομη σύσταση σε 2 γραμμές: κράτα/κλείσε θέση και γιατί."}]
+                        )
+                        advice = advice_resp.content[0].text
+                    except:
+                        advice = "💡 Έλεγξε χειροκίνητα τη θέση σου."
 
                     alerts.append(
                         f"⚡ ΑΛΛΑΓΗ: {symbol} ({name})\n"
                         f"{direction} {emoji} {price_change:+.2f}%\n"
-                        f"💰 Από ${old_price} → ${round(current_price, 4)}\n"
-                        f"━━━━━━━━━━━━━━━━━\n"
-                        f"{ai_advice}"
+                        f"💰 ${old_price} → ${round(current_price,4)}\n"
+                        f"━━━━━━━\n{advice}"
                     )
                     self.alerts_sent.add(alert_key)
 
-                # Spike όγκου
-                avg_5m_vol = hist['Volume'].mean()
-                if avg_5m_vol > 0 and (current_vol / (avg_5m_vol * 3)) >= VOLUME_SPIKE_ALERT:
-                    vol_key = f"{symbol}_vol_{now.hour}_{now.minute // 10}"
-                    if vol_key not in self.alerts_sent:
-                        alerts.append(
-                            f"📊 SPIKE ΟΓΚΟΥ: {symbol} ({name})\n"
-                            f"🔥 Ασυνήθιστος όγκος τελευταία 15λεπτα!\n"
-                            f"💡 Ενδέχεται μεγάλη κίνηση τιμής σύντομα."
-                        )
-                        self.alerts_sent.add(vol_key)
-
             except Exception as e:
-                logger.error(f"Monitor error {symbol}: {e}")
+                logger.error(f"Monitor {symbol}: {e}")
 
         if alerts:
-            msg = f"🚨 ALERT - {now.strftime('%H:%M')}\n\n" + "\n\n─────────────\n\n".join(alerts)
+            msg = f"🚨 ALERT {now.strftime('%H:%M')}\n\n" + "\n\n─────\n\n".join(alerts)
             self.send_telegram(msg)
-            logger.info(f"🚨 Εστάλησαν {len(alerts)} alerts")
-        else:
-            logger.info(f"✅ {now.strftime('%H:%M')} - Δεν υπάρχουν σημαντικές αλλαγές")
-
-    def get_ai_alert_advice(self, symbol, name, old_price, new_price, change_pct, snap):
-        """Claude αξιολογεί αν πρέπει να αλλάξει η θέση"""
-        try:
-            prompt = f"""Είσαι trading advisor. Ένα signal άλλαξε:
-
-Μετοχή: {symbol} ({name})
-Τιμή στις 16:00: ${old_price}
-Τώρα: ${round(new_price, 4)} ({change_pct:+.2f}%)
-RSI: {snap['rsi']} | ATR: {snap['atr']}
-
-Δώσε ΣΥΝΤΟΜΗ σύσταση (max 3 γραμμές):
-- Κράτα θέση / Κλείσε θέση / Άλλαξε Stop Loss
-- Γιατί (1 πρόταση)
-- Νέο Stop Loss αν χρειάζεται"""
-
-            response = self.client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=200,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            return response.content[0].text
-        except:
-            return "💡 Έλεγξε χειροκίνητα τη θέση σου."
 
 
 # ─────────────────────────────────────────────
-# SCHEDULER
+# MAIN
 # ─────────────────────────────────────────────
 def main():
     agent = TradingAgent()
     greece_tz = pytz.timezone("Europe/Athens")
 
+    # Φόρτωση συμβόλων
+    agent.load_all_symbols()
+
     agent.send_telegram(
-        "🟢 AI Trading Agent v2.0 ξεκίνησε!\n"
-        "📊 Αρχική ανάλυση: 16:00\n"
-        "🔍 Monitoring κάθε 5λεπτα: 16:00-17:00\n"
-        "🚨 Alerts αν αλλάξει κάτι σημαντικό\n"
-        "🎯 Στόχος: €250/ημέρα"
+        f"🟢 AI Trading Agent v3.0 ξεκίνησε!\n"
+        f"📊 Κοιτάει {len(agent.all_symbols)} σύμβολα:\n"
+        f"• Όλες οι μετοχές S&P 500\n"
+        f"• Υποψήφιες για S&P 500\n"
+        f"• Commodities & Indices\n"
+        f"⏰ Ανάλυση κάθε μέρα 16:00\n"
+        f"🔍 Monitoring 16:00-17:00\n"
+        f"🎯 Στόχος: €250/ημέρα"
     )
 
-    logger.info("⏳ Agent έτοιμος - αναμονή...")
+    logger.info("⏳ Agent έτοιμος!")
 
     analysis_done_today = False
     last_monitor_check = None
 
     while True:
         now_greece = datetime.now(greece_tz)
-        now_utc = datetime.now(pytz.utc)
-        today = now_greece.date()
         current_hour = now_greece.hour
         current_minute = now_greece.minute
 
-        # ── Αρχική ανάλυση ακριβώς στις 16:00 ώρα Ελλάδας ──
+        # Αρχική ανάλυση 16:00
         if current_hour == 16 and current_minute == 0 and not analysis_done_today:
             agent.run_daily_analysis()
             analysis_done_today = True
@@ -391,14 +422,17 @@ def main():
         # Reset για επόμενη μέρα
         if current_hour == 0 and current_minute == 0:
             analysis_done_today = False
+            agent.load_all_symbols()  # Ενημέρωση λίστας κάθε μέρα
 
-        # ── Monitoring κάθε 5 λεπτά μεταξύ 16:00-17:00 ──
-        if current_hour == 16 or (current_hour == 16 and current_minute >= 0):
-            if last_monitor_check is None or (now_greece - last_monitor_check).seconds >= MONITOR_INTERVAL_MINUTES * 60:
+        # Monitoring κάθε 5 λεπτά 16:00-17:00
+        if current_hour == 16:
+            if (last_monitor_check is None or
+                    (now_greece - last_monitor_check).seconds >= MONITOR_INTERVAL_MINUTES * 60):
                 agent.check_for_changes()
                 last_monitor_check = now_greece
 
-        time.sleep(20)  # Έλεγχος κάθε 20 δευτερόλεπτα
+        time.sleep(20)
+
 
 if __name__ == "__main__":
     main()
