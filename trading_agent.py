@@ -415,7 +415,7 @@ def main():
         current_minute = now_greece.minute
 
         # Αρχική ανάλυση 16:00
-        if current_hour == 16 and current_minute =45  and not analysis_done_today:
+        if current_hour == 16 and current_minute = 50  and not analysis_done_today:
             agent.run_daily_analysis()
             analysis_done_today = True
 
