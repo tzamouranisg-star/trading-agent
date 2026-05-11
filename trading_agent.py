@@ -414,8 +414,8 @@ def main():
         current_hour = now_greece.hour
         current_minute = now_greece.minute
 
-        # Αρχική ανάλυση 16:00
-        if current_hour == 16 and current_minute == 50  and not analysis_done_today:
+        # Αρχική ανάλυση 16:20
+        if current_hour == 16 and current_minute == 20  and not analysis_done_today:
             agent.run_daily_analysis()
             analysis_done_today = True
 
@@ -424,7 +424,7 @@ def main():
             analysis_done_today = False
             agent.load_all_symbols()  # Ενημέρωση λίστας κάθε μέρα
 
-        # Monitoring κάθε 5 λεπτά 16:00-17:00
+        # Monitoring κάθε 5 λεπτά 16:00-18:00
         if current_hour == 16:
             if (last_monitor_check is None or
                     (now_greece - last_monitor_check).seconds >= MONITOR_INTERVAL_MINUTES * 60):
