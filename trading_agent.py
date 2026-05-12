@@ -443,7 +443,7 @@ def main():
             agent.load_all_symbols()  # Ενημέρωση λίστας κάθε μέρα
 
         # Monitoring κάθε 5 λεπτά 16:20-18:00
-        if current_hour == 16 and current_minute == 20
+        if current_hour == 16:
             if (last_monitor_check is None or
                     (now_greece - last_monitor_check).seconds >= MONITOR_INTERVAL_MINUTES * 60):
                 agent.check_for_changes()
