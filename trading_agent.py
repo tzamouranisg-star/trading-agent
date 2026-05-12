@@ -3,7 +3,7 @@
 AI Trading Agent για uFunded Platform - v3.0
 - Όλες οι μετοχές S&P 500 + υποψήφιες
 - Αυτόματη ενημέρωση λίστας
-- Monitoring 16:00-17:00
+- Monitoring 16:20-18:00
 - Alerts για σημαντικές αλλαγές
 """
 
@@ -24,7 +24,7 @@ TELEGRAM_CHAT_ID = "7235378762"
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 LEVERAGE_CAPITAL = 90_000
 MONITOR_INTERVAL_MINUTES = 5
-MONITOR_END_HOUR = 17
+MONITOR_END_HOUR = 18
 PRICE_CHANGE_ALERT = 0.8
 VOLUME_SPIKE_ALERT = 2.5
 
@@ -234,7 +234,14 @@ class TradingAgent:
 
         today_date = datetime.now().strftime("%d/%m/%Y")
         prompt = f"""Είσαι expert trading analyst για uFunded με μόχλευση $90,000 USD.
-ΗΜΕΡΟΜΗΝΙΑ: {today_date} | ΣΤΟΧΟΣ: €250 ημερήσιο κέρδος
+ΗΜΕΡΟΜΗΝΙΑ: {today_date} | ΣΤΟΧΟΣ: €250 ημερήσιο κέρδος | ΙΣΟΤΙΜΙΑ: 1 USD = 0.85 EUR
+
+=== ΚΑΝΟΝΕΣ ΔΙΑΧΕΙΡΙΣΗΣ ΚΕΦΑΛΑΙΟΥ ===
+ΣΥΝΟΛΙΚΟ ΚΕΦΑΛΑΙΟ: $90,000 (με μόχλευση uFunded)
+ΜΕΓΙΣΤΟ ανά θέση: $20,000 (22% του χαρτοφυλακίου)
+ΕΛΑΧΙΣΤΟ ανά θέση: $5,000 (5% του χαρτοφυλακίου)
+ΜΕΓΙΣΤΟ ΡΙΣΚΟ ανά trade: 1.5% του κεφαλαίου = $1,350
+Αριθμός μετοχών που αγοράζω = ποσό επένδυσης / τιμή entry
 
 Ανέλυσα {len(market_data)} μετοχές S&P 500 + υποψήφιες + commodities.
 Τα παρακάτω είναι τα TOP movers σήμερα:
@@ -245,6 +252,13 @@ class TradingAgent:
 Προτίμησε μετοχές με: ισχυρά τεχνικά σήματα, υψηλό όγκο, σαφή τάση.
 Αν υπάρχει υποψήφια S&P 500 με δυνατά σήματα, συμπερίλαβέ την!
 
+ΥΠΟΛΟΓΙΣΕ για κάθε trade:
+- Ποσό επένδυσης βάσει εμπιστοσύνης: Υψηλό=$18,000-20,000 / Μέτριο=$10,000-15,000 / Χαμηλό=$5,000-8,000
+- Αριθμό μετοχών/units = ποσό / τιμή entry (στρογγυλοποίησε)
+- Stop Loss βάσει ATR x 1.5
+- Take Profit βάσει R:R = 2:1 minimum
+- Αναμενόμενο κέρδος = (Take Profit - Entry) x αριθμός μετοχών
+
 Format:
 🎯 TOP 5 TRADING SIGNALS - {today_date}
 📊 Ανάλυση: {len(market_data)} μετοχές S&P500 + υποψήφιες + commodities
@@ -253,18 +267,22 @@ Format:
 📌 1. [ΣΥΜΒΟΛΟ] - [ΟΝΟΜΑ] [[ΚΑΤΗΓΟΡΙΑ]]
 [BUY 🟢 ή SELL 🔴]
 💰 Entry: $[τιμή]
-🛑 Stop Loss: $[τιμή] (-[%]%)
-🎯 Take Profit: $[τιμή] (+[%]%)
-💼 Κεφάλαιο: $[ποσό] ([%]%)
+🛑 Stop Loss: $[τιμή] (-[%]% | -$[ζημία] αν χτυπήσει)
+🎯 Take Profit: $[τιμή] (+[%]% | +$[κέρδος] αν χτυπήσει)
+💼 Επένδυση: $[ποσό] ([%]% του χαρτοφυλακίου)
+📦 Αριθμός: [X] μετοχές/units
 📈 Αναμ. Κέρδος: $[USD] ≈ €[EUR]
-📊 Σήματα: [ανάλυση]
+⚠️ Μέγιστη Ζημία: $[USD] ≈ €[EUR]
+📊 Σήματα: [ανάλυση RSI/MACD/MA]
 ⚡ Εμπιστοσύνη: [Χαμηλό/Μέτριο/Υψηλό]
 
 [επανέλαβε για 2,3,4,5]
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 💹 ΣΥΝΟΛΙΚΟ ΑΝΑΜ. ΚΕΡΔΟΣ: $[USD] ≈ €[EUR]
-⚠️ Monitoring κάθε 5λεπτα έως 17:00"""
+💼 ΣΥΝΟΛΙΚΗ ΕΠΕΝΔΥΣΗ: $[USD] ([%]% του χαρτοφυλακίου)
+🛡️ ΣΥΝΟΛΙΚΟ ΜΕΓΙΣΤΟ ΡΙΣΚΟ: $[USD] ≈ €[EUR]
+⚠️ Monitoring κάθε 5λεπτα έως 18:00"""
 
         response = self.client.messages.create(
             model="claude-haiku-4-5-20251001",
@@ -274,10 +292,10 @@ Format:
         return response.content[0].text
 
     # ─────────────────────────────────────────────
-    # ΑΡΧΙΚΗ ΑΝΑΛΥΣΗ 16:00
+    # ΑΡΧΙΚΗ ΑΝΑΛΥΣΗ 16:20
     # ─────────────────────────────────────────────
     def run_daily_analysis(self):
-        logger.info("🚀 ΑΝΑΛΥΣΗ 16:00")
+        logger.info("🚀 ΑΝΑΛΥΣΗ 16:20")
         self.send_telegram(
             f"🔍 Ξεκινά ανάλυση {len(self.all_symbols)} μετοχών...\n"
             f"📊 S&P 500 + Υποψήφιες + Commodities\n"
@@ -309,7 +327,7 @@ Format:
                 f"📅 {datetime.now().strftime('%d/%m/%Y %H:%M')} (Ώρα Ελλάδας)\n"
                 f"💼 Κεφάλαιο: $90,000 | 🎯 Στόχος: €250\n"
                 f"📊 Σκανάρισα: {len(self.all_symbols)} μετοχές\n"
-                f"🔍 Monitoring κάθε 5λεπτα έως 17:00\n"
+                f"🔍 Monitoring κάθε 5λεπτα έως 18:00\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             )
             self.send_telegram(header + analysis)
@@ -320,7 +338,7 @@ Format:
             self.send_telegram(f"❌ Σφάλμα: {e}")
 
     # ─────────────────────────────────────────────
-    # MONITORING 16:00-17:00
+    # MONITORING 16:20-18:00
     # ─────────────────────────────────────────────
     def check_for_changes(self):
         greece_tz = pytz.timezone("Europe/Athens")
@@ -424,8 +442,8 @@ def main():
             analysis_done_today = False
             agent.load_all_symbols()  # Ενημέρωση λίστας κάθε μέρα
 
-        # Monitoring κάθε 5 λεπτά 16:00-18:00
-        if current_hour == 16:
+        # Monitoring κάθε 5 λεπτά 16:20-18:00
+        if current_hour == 16 and current_minute == 20
             if (last_monitor_check is None or
                     (now_greece - last_monitor_check).seconds >= MONITOR_INTERVAL_MINUTES * 60):
                 agent.check_for_changes()
