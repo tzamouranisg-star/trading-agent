@@ -3,7 +3,7 @@
 AI Trading Agent για uFunded Platform - v3.0
 - Όλες οι μετοχές S&P 500 + υποψήφιες
 - Αυτόματη ενημέρωση λίστας
-- Monitoring 16:20-18:00
+- Monitoring 16:00-17:00
 - Alerts για σημαντικές αλλαγές
 """
 
@@ -17,14 +17,14 @@ from datetime import datetime
 import pytz
 import logging
 import io
-import os
 
 TELEGRAM_BOT_TOKEN = "8713919672:AAEtVBMT9NsSfvXdHlVygrr7XanJU8GilG4"
 TELEGRAM_CHAT_ID = "7235378762"
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+ANTHROPIC_API_KEY = "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"
+
 LEVERAGE_CAPITAL = 90_000
 MONITOR_INTERVAL_MINUTES = 5
-MONITOR_END_HOUR = 18
+MONITOR_END_HOUR = 17
 PRICE_CHANGE_ALERT = 0.8
 VOLUME_SPIKE_ALERT = 2.5
 
@@ -219,6 +219,69 @@ class TradingAgent:
     # ─────────────────────────────────────────────
     # AI ΑΝΑΛΥΣΗ
     # ─────────────────────────────────────────────
+    def fetch_news(self, symbols_top10):
+        """Παίρνει τελευταία νέα για τις top μετοχές μέσω RSS feeds"""
+        news_data = {}
+        headers = {'User-Agent': 'Mozilla/5.0'}
+
+        for sym in symbols_top10:
+            articles = []
+            try:
+                # Yahoo Finance RSS για κάθε μετοχή
+                url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={sym}&region=US&lang=en-US"
+                resp = requests.get(url, headers=headers, timeout=8)
+                if resp.status_code == 200:
+                    import re
+                    titles = re.findall(r'<title><!\[CDATA\[(.*?)\]\]></title>', resp.text)
+                    articles = titles[1:4]  # Πρώτα 3 άρθρα (παραλείπουμε τον τίτλο feed)
+            except:
+                pass
+
+            if not articles:
+                try:
+                    # Fallback: Finviz news
+                    url2 = f"https://finviz.com/quote.ashx?t={sym}"
+                    resp2 = requests.get(url2, headers=headers, timeout=8)
+                    if resp2.status_code == 200:
+                        import re
+                        titles = re.findall(r'class="news-link-right"[^>]*>(.*?)</a>', resp2.text)
+                        articles = titles[:3]
+                except:
+                    pass
+
+            news_data[sym] = articles if articles else ["Δεν βρέθηκαν νέα"]
+
+        return news_data
+
+    def fetch_market_news(self):
+        """Παίρνει γενικά οικονομικά νέα"""
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        general_news = []
+        try:
+            # Reuters Business RSS
+            url = "https://feeds.reuters.com/reuters/businessNews"
+            resp = requests.get(url, headers=headers, timeout=8)
+            if resp.status_code == 200:
+                import re
+                titles = re.findall(r'<title><!\[CDATA\[(.*?)\]\]></title>', resp.text)
+                general_news = titles[1:6]
+        except:
+            pass
+
+        if not general_news:
+            try:
+                # CNBC RSS
+                url2 = "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114"
+                resp2 = requests.get(url2, headers=headers, timeout=8)
+                if resp2.status_code == 200:
+                    import re
+                    titles = re.findall(r'<title>(.*?)</title>', resp2.text)
+                    general_news = [t for t in titles[1:6] if len(t) > 20]
+            except:
+                pass
+
+        return general_news if general_news else ["Δεν βρέθηκαν γενικά νέα"]
+
     def analyze_with_claude(self, market_data):
         data_summary = []
         for d in market_data[:60]:  # Max 60 για να χωράει στο context
@@ -232,9 +295,27 @@ class TradingAgent:
                 f"  Όγκος: {d.get('vol_ratio','N/A')}x μέσο"
             )
 
+        # Νέα για top 10 μετοχές
+        top10_symbols = [d['symbol'] for d in market_data[:10]]
+        logger.info("📰 Συλλογή νέων...")
+        news_data = self.fetch_news(top10_symbols)
+        general_news = self.fetch_market_news()
+
+        # Φτιάξε news summary
+        news_summary = "=== ΤΕΛΕΥΤΑΙΑ ΟΙΚΟΝΟΜΙΚΑ ΝΕΑ ===\n"
+        news_summary += "📰 Γενικά νέα αγοράς:\n"
+        for n in general_news:
+            news_summary += f"  • {n}\n"
+        news_summary += "\n📊 Νέα ανά μετοχή:\n"
+        for sym, articles in news_data.items():
+            name = next((d['name'] for d in market_data if d['symbol'] == sym), sym)
+            news_summary += f"  {sym} ({name}):\n"
+            for a in articles:
+                news_summary += f"    - {a}\n"
+
         today_date = datetime.now().strftime("%d/%m/%Y")
         prompt = f"""Είσαι expert trading analyst για uFunded με μόχλευση $90,000 USD.
-ΗΜΕΡΟΜΗΝΙΑ: {today_date} | ΣΤΟΧΟΣ: €250 ημερήσιο κέρδος | ΙΣΟΤΙΜΙΑ: 1 USD = 0.85 EUR
+ΗΜΕΡΟΜΗΝΙΑ: {today_date} | ΣΤΟΧΟΣ: €250 ημερήσιο κέρδος | ΙΣΟΤΙΜΙΑ: 1 USD = 0.92 EUR
 
 === ΚΑΝΟΝΕΣ ΔΙΑΧΕΙΡΙΣΗΣ ΚΕΦΑΛΑΙΟΥ ===
 ΣΥΝΟΛΙΚΟ ΚΕΦΑΛΑΙΟ: $90,000 (με μόχλευση uFunded)
@@ -243,13 +324,19 @@ class TradingAgent:
 ΜΕΓΙΣΤΟ ΡΙΣΚΟ ανά trade: 1.5% του κεφαλαίου = $1,350
 Αριθμός μετοχών που αγοράζω = ποσό επένδυσης / τιμή entry
 
-Ανέλυσα {len(market_data)} μετοχές S&P 500 + υποψήφιες + commodities.
-Τα παρακάτω είναι τα TOP movers σήμερα:
+{news_summary}
 
+=== ΤΕΧΝΙΚΗ ΑΝΑΛΥΣΗ - TOP MOVERS ({len(market_data)} μετοχές) ===
 {chr(10).join(data_summary)}
 
-Επέλεξε τις ΚΑΛΥΤΕΡΕΣ 5 ευκαιρίες για trading σήμερα.
-Προτίμησε μετοχές με: ισχυρά τεχνικά σήματα, υψηλό όγκο, σαφή τάση.
+=== ΕΝΤΟΛΗ ===
+Επέλεξε τις ΚΑΛΥΤΕΡΕΣ 5 ευκαιρίες συνδυάζοντας:
+1. ΤΕΧΝΙΚΗ ΑΝΑΛΥΣΗ (RSI, MACD, ATR, όγκος)
+2. ΘΕΜΕΛΙΩΔΗ ΑΝΑΛΥΣΗ (τι λένε τα νέα για κάθε μετοχή)
+3. SENTIMENT (θετικά/αρνητικά νέα = BUY/SELL ευκαιρία)
+
+Αν τα νέα είναι ΑΡΝΗΤΙΚΑ για μια μετοχή → πρότεινε SELL
+Αν τα νέα είναι ΘΕΤΙΚΑ → πρότεινε BUY
 Αν υπάρχει υποψήφια S&P 500 με δυνατά σήματα, συμπερίλαβέ την!
 
 ΥΠΟΛΟΓΙΣΕ για κάθε trade:
@@ -261,11 +348,12 @@ class TradingAgent:
 
 Format:
 🎯 TOP 5 TRADING SIGNALS - {today_date}
-📊 Ανάλυση: {len(market_data)} μετοχές S&P500 + υποψήφιες + commodities
+📊 Ανάλυση: {len(market_data)} μετοχές + νέα αγοράς
 
 ═══════════════════════════
 📌 1. [ΣΥΜΒΟΛΟ] - [ΟΝΟΜΑ] [[ΚΑΤΗΓΟΡΙΑ]]
 [BUY 🟢 ή SELL 🔴]
+📰 Νέα: [σχετικό νέο που επηρεάζει την απόφαση]
 💰 Entry: $[τιμή]
 🛑 Stop Loss: $[τιμή] (-[%]% | -$[ζημία] αν χτυπήσει)
 🎯 Take Profit: $[τιμή] (+[%]% | +$[κέρδος] αν χτυπήσει)
@@ -273,7 +361,7 @@ Format:
 📦 Αριθμός: [X] μετοχές/units
 📈 Αναμ. Κέρδος: $[USD] ≈ €[EUR]
 ⚠️ Μέγιστη Ζημία: $[USD] ≈ €[EUR]
-📊 Σήματα: [ανάλυση RSI/MACD/MA]
+📊 Τεχνικά: [ανάλυση RSI/MACD/MA]
 ⚡ Εμπιστοσύνη: [Χαμηλό/Μέτριο/Υψηλό]
 
 [επανέλαβε για 2,3,4,5]
@@ -292,10 +380,10 @@ Format:
         return response.content[0].text
 
     # ─────────────────────────────────────────────
-    # ΑΡΧΙΚΗ ΑΝΑΛΥΣΗ 16:20
+    # ΑΡΧΙΚΗ ΑΝΑΛΥΣΗ 16:00
     # ─────────────────────────────────────────────
     def run_daily_analysis(self):
-        logger.info("🚀 ΑΝΑΛΥΣΗ 16:20")
+        logger.info("🚀 ΑΝΑΛΥΣΗ 16:00")
         self.send_telegram(
             f"🔍 Ξεκινά ανάλυση {len(self.all_symbols)} μετοχών...\n"
             f"📊 S&P 500 + Υποψήφιες + Commodities\n"
@@ -327,7 +415,7 @@ Format:
                 f"📅 {datetime.now().strftime('%d/%m/%Y %H:%M')} (Ώρα Ελλάδας)\n"
                 f"💼 Κεφάλαιο: $90,000 | 🎯 Στόχος: €250\n"
                 f"📊 Σκανάρισα: {len(self.all_symbols)} μετοχές\n"
-                f"🔍 Monitoring κάθε 5λεπτα έως 18:00\n"
+                f"🔍 Monitoring κάθε 5λεπτα έως 17:00\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             )
             self.send_telegram(header + analysis)
@@ -338,7 +426,7 @@ Format:
             self.send_telegram(f"❌ Σφάλμα: {e}")
 
     # ─────────────────────────────────────────────
-    # MONITORING 16:20-18:00
+    # MONITORING 16:00-17:00
     # ─────────────────────────────────────────────
     def check_for_changes(self):
         greece_tz = pytz.timezone("Europe/Athens")
@@ -432,8 +520,8 @@ def main():
         current_hour = now_greece.hour
         current_minute = now_greece.minute
 
-        # Αρχική ανάλυση 16:20
-        if current_hour == 16 and current_minute == 20  and not analysis_done_today:
+        # Αρχική ανάλυση 16:00
+        if current_hour == 16 and current_minute == 0 and not analysis_done_today:
             agent.run_daily_analysis()
             analysis_done_today = True
 
@@ -442,7 +530,7 @@ def main():
             analysis_done_today = False
             agent.load_all_symbols()  # Ενημέρωση λίστας κάθε μέρα
 
-        # Monitoring κάθε 5 λεπτά 16:20-18:00
+        # Monitoring κάθε 5 λεπτά 16:00-17:00
         if current_hour == 16:
             if (last_monitor_check is None or
                     (now_greece - last_monitor_check).seconds >= MONITOR_INTERVAL_MINUTES * 60):
