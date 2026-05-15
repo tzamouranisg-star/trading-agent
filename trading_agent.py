@@ -492,6 +492,87 @@ Format:
 # ─────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────
+def is_nyse_trading_day(date):
+    """Ελέγχει αν είναι εργάσιμη μέρα του NYSE"""
+    # Σαββατοκύριακο
+    if date.weekday() >= 5:
+        return False
+
+    year = date.year
+    month = date.month
+    day = date.day
+
+    # Αμερικανικές αργίες NYSE
+    holidays = [
+        # New Year's Day
+        (1, 1),
+        # MLK Day (3η Δευτέρα Ιανουαρίου)
+        # Presidents Day (3η Δευτέρα Φεβρουαρίου)
+        # Memorial Day (τελευταία Δευτέρα Μαΐου)
+        # Juneteenth
+        (6, 19),
+        # Independence Day
+        (7, 4),
+        # Labor Day (1η Δευτέρα Σεπτεμβρίου)
+        # Thanksgiving (4η Πέμπτη Νοεμβρίου)
+        # Christmas
+        (12, 25),
+    ]
+
+    # Σταθερές αργίες
+    if (month, day) in holidays:
+        return False
+
+    # MLK Day - 3η Δευτέρα Ιανουαρίου
+    if month == 1 and date.weekday() == 0:
+        mondays = [d for d in range(1, 32) if
+                   date.replace(day=d).weekday() == 0]
+        if len(mondays) >= 3 and day == mondays[2]:
+            return False
+
+    # Presidents Day - 3η Δευτέρα Φεβρουαρίου
+    if month == 2 and date.weekday() == 0:
+        mondays = [d for d in range(1, 29) if
+                   date.replace(day=d).weekday() == 0]
+        if len(mondays) >= 3 and day == mondays[2]:
+            return False
+
+    # Memorial Day - τελευταία Δευτέρα Μαΐου
+    if month == 5 and date.weekday() == 0:
+        mondays = [d for d in range(1, 32) if
+                   date.replace(day=d).weekday() == 0]
+        if day == mondays[-1]:
+            return False
+
+    # Labor Day - 1η Δευτέρα Σεπτεμβρίου
+    if month == 9 and date.weekday() == 0:
+        mondays = [d for d in range(1, 31) if
+                   date.replace(day=d).weekday() == 0]
+        if day == mondays[0]:
+            return False
+
+    # Thanksgiving - 4η Πέμπτη Νοεμβρίου
+    if month == 11 and date.weekday() == 3:
+        thursdays = [d for d in range(1, 31) if
+                     date.replace(day=d).weekday() == 3]
+        if len(thursdays) >= 4 and day == thursdays[3]:
+            return False
+
+    # Αν αργία πέφτει Σάββατο → κλειστό Παρασκευή
+    # Αν αργία πέφτει Κυριακή → κλειστό Δευτέρα
+    for (m, d) in [(1,1), (6,19), (7,4), (12,25)]:
+        try:
+            holiday = date.replace(month=m, day=d)
+            if holiday.weekday() == 5 and date == holiday - __import__('datetime').timedelta(days=1):
+                return False
+            if holiday.weekday() == 6 and date == holiday + __import__('datetime').timedelta(days=1):
+                return False
+        except:
+            pass
+
+    return True
+
+
 def main():
     agent = TradingAgent()
     greece_tz = pytz.timezone("Europe/Athens")
@@ -505,8 +586,9 @@ def main():
         f"• Όλες οι μετοχές S&P 500\n"
         f"• Υποψήφιες για S&P 500\n"
         f"• Commodities & Indices\n"
-        f"⏰ Ανάλυση κάθε μέρα 16:00\n"
-        f"🔍 Monitoring 16:00-17:00\n"
+        f"⏰ Ανάλυση Δευτ-Παρ στις 16:20\n"
+        f"🔍 Monitoring 16:20-18:00\n"
+        f"📅 Παρακάμπτει αργίες NYSE\n"
         f"🎯 Στόχος: €250/ημέρα"
     )
 
@@ -519,9 +601,17 @@ def main():
         now_greece = datetime.now(greece_tz)
         current_hour = now_greece.hour
         current_minute = now_greece.minute
+        today = now_greece.date()
 
-        # Αρχική ανάλυση 16:00
-        if current_hour == 16 and current_minute == 0 and not analysis_done_today:
+        # Έλεγχος αν είναι εργάσιμη μέρα NYSE
+        trading_day = is_nyse_trading_day(today)
+
+        if not trading_day and current_hour == 9 and current_minute == 0:
+            day_name = ["Δευτέρα","Τρίτη","Τετάρτη","Πέμπτη","Παρασκευή","Σάββατο","Κυριακή"][today.weekday()]
+            logger.info(f"📅 {day_name} - Κλειστό NYSE, παραλείπεται")
+
+        # Αρχική ανάλυση 16:20 — ΜΟΝΟ εργάσιμες
+        if current_hour == 16 and current_minute == 20 and not analysis_done_today and trading_day:
             agent.run_daily_analysis()
             analysis_done_today = True
 
@@ -530,8 +620,8 @@ def main():
             analysis_done_today = False
             agent.load_all_symbols()  # Ενημέρωση λίστας κάθε μέρα
 
-        # Monitoring κάθε 5 λεπτά 16:00-17:00
-        if current_hour == 16:
+        # Monitoring κάθε 5 λεπτά 16:20-18:00 — ΜΟΝΟ εργάσιμες
+        if current_hour == 16 and trading_day:
             if (last_monitor_check is None or
                     (now_greece - last_monitor_check).seconds >= MONITOR_INTERVAL_MINUTES * 60):
                 agent.check_for_changes()
