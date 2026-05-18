@@ -461,23 +461,72 @@ Format:
                 if abs(price_change) >= PRICE_CHANGE_ALERT and alert_key not in self.alerts_sent:
                     direction = "📈 ΑΝΕΒΗΚΕ" if price_change > 0 else "📉 ΕΠΕΣΕ"
                     emoji = "🟢" if price_change > 0 else "🔴"
+                    rsi = snap.get('rsi', 50)
+                    atr = snap.get('atr', current_price * 0.02)
 
+                    # Νέα για τη μετοχή
+                    news_list = self.fetch_news([symbol])
+                    news_text = news_list.get(symbol, ["Δεν βρέθηκαν νέα"])[0]
+
+                    # Υπολογισμός SL/TP/Position Size
+                    sl_pct = atr * 1.5 / current_price * 100
+                    tp_pct = sl_pct * 2
+
+                    if price_change > 0:
+                        # BUY signal
+                        action = "BUY 🟢"
+                        sl_price = round(current_price * (1 - sl_pct/100), 4)
+                        tp_price = round(current_price * (1 + tp_pct/100), 4)
+                    else:
+                        # SELL signal
+                        action = "SELL 🔴"
+                        sl_price = round(current_price * (1 + sl_pct/100), 4)
+                        tp_price = round(current_price * (1 - tp_pct/100), 4)
+
+                    # Position sizing
+                    confidence = "Υψηλό" if abs(price_change) > 2 else "Μέτριο" if abs(price_change) > 1 else "Χαμηλό"
+                    invest_amount = 18000 if confidence == "Υψηλό" else 12000 if confidence == "Μέτριο" else 7000
+                    num_shares = round(invest_amount / current_price)
+                    expected_profit = round(abs(tp_price - current_price) * num_shares, 2)
+                    max_loss = round(abs(sl_price - current_price) * num_shares, 2)
+                    expected_profit_eur = round(expected_profit * 0.92, 2)
+                    max_loss_eur = round(max_loss * 0.92, 2)
+                    invest_pct = round(invest_amount / 90000 * 100)
+
+                    # AI ανάλυση
                     try:
                         advice_resp = self.client.messages.create(
                             model="claude-haiku-4-5-20251001",
-                            max_tokens=150,
+                            max_tokens=200,
                             messages=[{"role": "user", "content":
-                                f"Trading alert: {symbol} άλλαξε {price_change:+.2f}% από ${old_price} → ${round(current_price,4)}. RSI: {snap.get('rsi','N/A')}. Σύντομη σύσταση σε 2 γραμμές: κράτα/κλείσε θέση και γιατί."}]
+                                f"""Μετοχή: {symbol} ({name})
+Αλλαγή: {price_change:+.2f}% | Τιμή: ${old_price} → ${round(current_price,4)}
+RSI: {rsi} | ATR: {atr}
+Νέο: {news_text}
+
+Γράψε 1 πρόταση τεχνική ανάλυση και 1 πρόταση γιατί να αγοράσω/πουλήσω."""}]
                         )
-                        advice = advice_resp.content[0].text
+                        technical_analysis = advice_resp.content[0].text
                     except:
-                        advice = "💡 Έλεγξε χειροκίνητα τη θέση σου."
+                        rsi_text = "υπερπουλημένη - ευκαιρία BUY" if rsi < 30 else "υπεραγορασμένη - ευκαιρία SELL" if rsi > 70 else "ουδέτερο RSI"
+                        technical_analysis = f"RSI {rsi} ({rsi_text}). Παρακολούθησε προσεκτικά."
 
                     alerts.append(
-                        f"⚡ ΑΛΛΑΓΗ: {symbol} ({name})\n"
-                        f"{direction} {emoji} {price_change:+.2f}%\n"
-                        f"💰 ${old_price} → ${round(current_price,4)}\n"
-                        f"━━━━━━━\n{advice}"
+                        f"🚨 ALERT {now.strftime('%H:%M')} - {symbol}\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"📌 {symbol} - {name}\n"
+                        f"{action}\n"
+                        f"{direction} {price_change:+.2f}%\n"
+                        f"📰 Νέα: {news_text}\n"
+                        f"💰 Entry: ${round(current_price, 4)}\n"
+                        f"🛑 Stop Loss: ${sl_price} (-{round(sl_pct,1)}% | -${max_loss} αν χτυπήσει)\n"
+                        f"🎯 Take Profit: ${tp_price} (+{round(tp_pct,1)}% | +${expected_profit} αν χτυπήσει)\n"
+                        f"💼 Επένδυση: ${invest_amount:,} ({invest_pct}% του χαρτοφυλακίου)\n"
+                        f"📦 Αριθμός: {num_shares} μετοχές\n"
+                        f"📈 Αναμ. Κέρδος: ${expected_profit} ≈ €{expected_profit_eur}\n"
+                        f"⚠️ Μέγιστη Ζημία: ${max_loss} ≈ €{max_loss_eur}\n"
+                        f"📊 Τεχνικά: {technical_analysis}\n"
+                        f"⚡ Εμπιστοσύνη: {confidence}"
                     )
                     self.alerts_sent.add(alert_key)
 
@@ -485,8 +534,9 @@ Format:
                 logger.error(f"Monitor {symbol}: {e}")
 
         if alerts:
-            msg = f"🚨 ALERT {now.strftime('%H:%M')}\n\n" + "\n\n─────\n\n".join(alerts)
-            self.send_telegram(msg)
+            for alert in alerts:
+                self.send_telegram(alert)
+                time.sleep(1)
 
 
 # ─────────────────────────────────────────────
